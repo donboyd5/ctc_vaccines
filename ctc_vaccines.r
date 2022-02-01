@@ -146,29 +146,6 @@ saveRDS(vax, here::here("data", "vax.rds"))
 # figure for proposal -----------------------------------------------------
 vax <- readRDS(here::here("data", "vax.rds"))
 
-#.. construct data by week in July-Dec 2021 ---------------------------------
-vweeks <- vax %>%
-  filter(date >= "2021-07-01", 
-         date <= "2021-12-31",
-         state %in% state.abb,
-         !str_detect(county, "Unknown")) %>%
-  mutate(day=day(date), 
-         nmonth=month(date)) %>%
-  filter(day %in% c(7, 14, 21)) %>%
-  # compute incremental vaccinations between weeks
-  arrange(state, county, date) %>%
-  group_by(state, county) %>%
-  mutate(vaxpct=dose118p / pop18p, # we need more precision than reported
-         newvax=vaxpct - lag(vaxpct)) %>%
-  filter(day != 7) %>%
-  ungroup %>%
-  mutate(week=factor(day,
-                     levels=c(14, 21),
-                     labels=c("ctcm1", "ctcp1")), # minus or plus 1 week
-         month=factor(nmonth,
-                      levels=7:12,
-                      labels=month.abb[7:12])
-  )
 
 
 #.. find states with large numbers of A and D social vulnerability counties ----
@@ -194,39 +171,81 @@ svigroups %>%
   filter(n_A >= 5, n_D >= 5) %>%
   arrange(desc(poppct_D))
 
-
+#.. construct data by week in July-Dec 2021 ---------------------------------
+vweeks <- vax %>%
+  filter(date >= "2021-07-01", 
+         date <= "2021-12-31",
+         state %in% state.abb,
+         dose118p > 0,
+         !str_detect(county, "Unknown")) %>%
+  mutate(day=day(date), 
+         nmonth=month(date)) %>%
+  filter(day %in% c(7, 14, 21)) %>%
+  # compute incremental vaccinations between weeks
+  arrange(state, county, date) %>%
+  group_by(state, county) %>%
+  mutate(pch_cumul=dose118p / lag(dose118p) - 1,
+         newvax=dose118p - lag(dose118p)) %>%
+  filter(day != 7) %>%
+  ungroup %>%
+  mutate(week=factor(day,
+                     levels=c(14, 21),
+                     labels=c("ctcm1", "ctcp1")), # minus or plus 1 week
+         month=factor(nmonth,
+                      levels=7:12,
+                      labels=month.abb[7:12])
+  )
 
 #.. prepare graph -----------------------------------------------------------
 sts <- c("GA", "TN", "KY", "VA")  # top 4 states with enough svi A, D counties
+
 pdata <- vweeks %>%
   filter(state %in% sts,
          week %in% c("ctcm1", "ctcp1"),
          svi %in% c("A", "D")) %>%
   mutate(stname=stname(state)) %>%
-  select(month, state, stname, county, svi, svif, week, dose118p) %>%
-  pivot_wider(names_from = week, values_from = dose118p) %>%
-  mutate(change=ctcp1 - ctcm1,
-         pch=change / ctcm1,
-         outlier=abs(pch) > .4) %>% # based on prior inspection of data
-  na.omit()
+  select(month, state, stname, county, pop18p, svi, svif, week, dose118p, newvax) %>%
+  mutate(newvaxpct=newvax / pop18p) %>%
+  select(month, state, stname, county, pop18p, svi, svif, week, value=newvaxpct) %>%
+  pivot_wider(names_from = week) %>%
+  na.omit() %>%
+  mutate(change=ctcp1 - ctcm1)
+# outlier=abs(pch) > .4) # based on prior inspection of data
 summary(pdata)
 
+# note that we do not have the same number of counties available in each group
+# big diff for GA in Jul, Dec, others not so bad
+pdata %>%
+  group_by(state, month, svi) %>%
+  summarise(n=n()) %>%
+  pivot_wider(names_from = svi, values_from = n) %>%
+  mutate(ntot=A + D)
+
+pdata %>%
+  group_by(state, month, svi) %>%
+  summarise(change=median(change)) %>%
+  pivot_wider(names_from = svi, values_from = change) %>%
+  mutate(DmA=D - A)
+
 capt1 <- "States selected have the largest percentages of their population in greatest-vulnerability counties,"
-capt2 <- "\namong states with at least 5 counties in least- and greatest- social vulnerability categories."
+capt2 <- " among states\nwith at least 5 counties in least- and greatest- social vulnerability categories."
 
-capt3 <- "\nNote: Each dot is a county. Outliers (n=8) with absolute % change greater than 40% are excluded."
+capt3 <- "\nNote: Each dot is a county."
 capt <- paste0(capt1, capt2 ,"\n", capt3)
+# . Outliers (n=8) with absolute % change greater than 40% are excluded.
 
-gtitle <- "% change in 1st-dose vaccinations from week before advance CTC deposit date to week after"
-gsubtitle <- "Selected states, population age 18+"
+gtitle <- "Change in 1st-dose age 18+ vaccinations from week before advance CTC deposit to week after"
+gsubtitle <- "As % of age 18+ population, selected states"
+
+ylab <- "Change in weekly vaccinations as % of population age 18+"
 
 p <- pdata %>%
-  filter(!outlier) %>%
-  ggplot(aes(month, pch, colour=svif)) +
+  # filter(!outlier) %>%
+  ggplot(aes(month, change, colour=svif)) +
   geom_point(position=position_dodge(width = 0.40), size=1) +
   geom_hline(yintercept = 0) +
-  scale_y_continuous(name="% change from week before to week after",
-                     breaks=seq(-1, 1, .02),
+  scale_y_continuous(name=ylab,
+                     breaks=seq(-1, 1, .01),
                      labels = label_percent(accuracy=1)) +
   scale_colour_manual(values=c("darkgreen", "blue")) +
   facet_wrap(~stname, ncol=2, scales="free") +
@@ -238,7 +257,7 @@ p <- pdata %>%
   theme_bw() +
   caption_left
 p
-ggsave(filename = here::here("results", "dose1pch_bysvi.png"),
+ggsave(filename = here::here("results", "dose1popch_bysvi.png"),
        plot=p, height=6, width=10, scale=1)
 
 
