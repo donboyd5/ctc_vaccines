@@ -32,8 +32,194 @@ library(DT)
 library(gt)
 library(gtsummary)
 
-# dirs ----
-dld <- r"(C:\Users\donbo\Downloads\ctcvax)"
+
+# notes, urls, etc. -------------------------------------------------------
+# state level data
+# path <- r"(C:\Users\donbo\Downloads\COVID-19_Vaccinations_in_the_United_States_Jurisdiction.csv)"
+
+
+# locations ----
+dld <- r"(C:\Users\donbo\Downloads\ctcvax)"  # download directory
+
+# constants -------------------------------------------------------------------------
+
+
+# get data ----------------------------------------------------------------
+#.. county-level cumulative vaccinations ----
+# https://www.cdc.gov/coronavirus/2019-ncov/vaccines/distributing/about-vaccine-data.html
+
+# county level data
+# https://data.cdc.gov/Vaccinations/COVID-19-Vaccinations-in-the-United-States-County/8xkx-amqh
+# https://data.cdc.gov/api/views/8xkx-amqh/rows.csv?accessType=DOWNLOAD
+
+# this does not work well:
+# url <- "https://data.cdc.gov/api/views/8xkx-amqh/rows.csv?accessType=DOWNLOAD"
+# url <- "https://data.cdc.gov/api/views/8xkx-amqh/rows.csv?accessType=DOWNLOAD&bom=true&format=true"
+# download.file(url, file.path(dld, "rows.csv"), mode="wb")
+
+# I was not successful in downloading programmatically - it is possible but takes long
+# better to download outside of R from url below and then read.
+# url <- "https://data.cdc.gov/Vaccinations/COVID-19-Vaccinations-in-the-United-States-County/8xkx-amqh"
+ 
+fname <- "COVID-19_Vaccinations_in_the_United_States_County_2022-01-31.csv"
+path <- file.path(dld, fname)
+df <- read_csv(path)
+dim(df)  # 1.3m, 51 cols
+glimpse(df)
+# tbl_summary(df) too much output
+# ages 5+, 12+, 18+, 65+
+
+# clean and save a subset -------------------------------------------------
+df2 <- df %>%
+  rename(date=Date,
+         fips=FIPS,
+         state=Recip_State,
+         county=Recip_County) %>%
+  mutate(date=as.Date(date, format="%m/%d/%Y")) %>%
+  arrange(date, state, county)
+summary(df2)
+ns(df2)
+
+df3 <- df2 %>%
+  select(date, mmrw=MMWR_week,
+         fips, state, county, 
+         metro=Metro_status,
+         dose118p=Administered_Dose1_Recip_18Plus,
+         poppct18p=Administered_Dose1_Recip_18PlusPop_Pct,
+         pop18p=Census2019_18PlusPop)
+memory()
+saveRDS(df3, here::here("data", "vax.rds"))
+rm(df, df2, df3)
+
+
+# explore -----------------------------------------------------------------
+vax <- readRDS(here::here("data", "vax.rds"))
+summary(vax)
+summary(vax %>% filter(date >= "2021-07-01", date <= "2021-12-31"))
+count(vax, metro)
+
+vax %>%
+  group_by(date) %>%
+  summarise(dose118p=sum(dose118p, na.rm=TRUE)) %>%
+  ggplot(aes(date, dose118p)) +
+  geom_line() +
+  geom_point() +
+  geom_smooth() +
+  ggtitle("total 18+ dose1 vaccinations")
+# something caused bump up around Nov; a few other small bumps
+
+vax %>%
+  group_by(date) %>%
+  summarise(n.notna=sum(!is.na(dose118p))) %>%
+  ggplot(aes(date, n.notna)) +
+  geom_line() +
+  geom_point() +
+  geom_smooth() +
+  ggtitle("# of not NA counties")
+# falls 10+% Jan-Jul 2021 then rises, weird
+
+vax %>%
+  group_by(date) %>%
+  filter(!is.na(dose118p), !is.na(pop18p)) %>%
+  summarise(dose118p=sum(dose118p),
+            pop18p=sum(pop18p)) %>%
+  mutate(poppct18p=dose118p / pop18p) %>%
+  ggplot(aes(date, poppct18p)) +
+  geom_line() +
+  geom_point() +
+  geom_smooth() +
+  ggtitle("vaccination rate 18+")
+# falls 10+% Jan-Jul 2021 then rises, weird
+
+# metro non/metro
+vax %>%
+  filter(!is.na(metro)) %>%
+  group_by(date, metro) %>%
+  filter(!is.na(dose118p), !is.na(pop18p)) %>%
+  summarise(dose118p=sum(dose118p),
+            pop18p=sum(pop18p), .groups="drop") %>%
+  mutate(poppct18p=dose118p / pop18p) %>%
+  ggplot(aes(date, poppct18p, colour=metro)) +
+  geom_line() +
+  geom_point() +
+  ggtitle("vaccination rate 18+, metro/non-metro")
+# metro much higher than nonmetro
+
+
+# weekly vaccinations, metro/nonmetro -------------------------------------
+pbase <- vax %>%
+  filter(!is.na(metro)) %>%
+  arrange(fips, state, county, date) %>%
+  group_by(fips, state, county) %>%
+  mutate(wpoppct18p=(poppct18p - lag(poppct18p, 7)) / 7) %>%
+  ungroup
+
+pbase %>%
+  filter(state=="NY", str_detect(county, "Albany")) %>%
+  tail(20)
+
+pdata <- pbase %>%
+  group_by(state, metro, date) %>%
+  summarise(wpoppct18p_mdn=median(wpoppct18p, na.rm=TRUE),
+            wpoppct18p_mn=mean(wpoppct18p, na.rm=TRUE), .groups="drop")
+
+pdata %>%
+  filter(state %in% c("CA", "FL", "NY", "SC")) %>%
+  filter(date >= "2021-06-15", date <= "2022-01-15") %>%
+  ggplot(aes(date, wpoppct18p_mn, colour=metro)) +
+  geom_line() +
+  geom_point() +
+  facet_wrap(~state, ncol=2)
+  
+  
+
+#  filter(state=="NY", str_detect_any(county, c("Albany", "Washington", "Chauttauqua")))
+
+pdata %>%
+  ggplot(aes(date, wpoppct18p, colour=county)) +
+  geom_line() +
+  geom_point()
+  group_by(date, metro) %>%
+  filter(!is.na(dose118p), !is.na(pop18p)) %>%
+  mutate(wpoppct18p=)
+  summarise(dose118p=sum(dose118p),
+            pop18p=sum(pop18p), .groups="drop") %>%
+  mutate(poppct18p=dose118p / pop18p) %>%
+  ggplot(aes(date, poppct18p, colour=metro)) +
+  geom_line() +
+  geom_point() +
+  ggtitle("vaccination rate 18+, metro/non-metro")
+
+
+
+
+#.. daily weekly monthly ----
+statecos <- count(df2, state, county)
+statecos %>%
+  filter(state=="SC")
+
+sccos <- statecos %>%
+  filter(state=="SC", county!="Unknown County")
+
+df3 <- df2 %>%
+  select(date, state, county, dose1=Administered_Dose1_Recip_18PlusPop_Pct) %>%
+  arrange(state, county, date) %>%
+  group_by(state, county) %>%
+  mutate(dose1=dose1 / 100,
+         daily=dose1 - lag(dose1, 1),
+         weekly=(dose1 - lag(dose1, 7)) / 7,
+         days30=(dose1 - lag(dose1, 30)) / 30) %>%
+  ungroup
+
+set.seed(1234)
+nsamp <- 4
+usecos <- sccos %>%
+  slice_sample(n=nsamp) %>%
+  arrange(county)
+usecos
+
+
+
 
 # sources ----
 # https://data.cdc.gov/Vaccinations/COVID-19-Vaccine-Distribution-Allocations-by-Juris/saz5-9hgg
@@ -67,56 +253,6 @@ glimpse(vhdf2) # 2351 records
 
 
 #.. Vaccine administration ----
-
-# https://www.cdc.gov/coronavirus/2019-ncov/vaccines/distributing/about-vaccine-data.html
-# state level data
-# path <- r"(C:\Users\donbo\Downloads\COVID-19_Vaccinations_in_the_United_States_Jurisdiction.csv)"
-
-# county level data
-# https://data.cdc.gov/Vaccinations/COVID-19-Vaccinations-in-the-United-States-County/8xkx-amqh
-# https://data.cdc.gov/api/views/8xkx-amqh/rows.csv?accessType=DOWNLOAD
-
-path <- file.path(dld, "COVID-19_Vaccinations_in_the_United_States_County.csv")
-df <- read_csv(path)
-dim(df)  # 1.3m, 51 cols
-glimpse(df)
-# tbl_summary(df)
-# ages 5+, 12+, 18+, 65+
-
-df2 <- df %>%
-  # setNames(str_to_lower(names(.))) %>%
-  rename(date=Date,
-         state=Recip_State,
-         county=Recip_County) %>%
-  mutate(date=as.Date(date, format="%m/%d/%Y")) %>%
-  arrange(date, state, county)
-summary(df2)
-
-
-#.. daily weekly monthly ----
-statecos <- count(df2, state, county)
-statecos %>%
-  filter(state=="SC")
-
-sccos <- statecos %>%
-  filter(state=="SC", county!="Unknown County")
-  
-df3 <- df2 %>%
-  select(date, state, county, dose1=Administered_Dose1_Recip_18PlusPop_Pct) %>%
-  arrange(state, county, date) %>%
-  group_by(state, county) %>%
-  mutate(dose1=dose1 / 100,
-         daily=dose1 - lag(dose1, 1),
-         weekly=(dose1 - lag(dose1, 7)) / 7,
-         days30=(dose1 - lag(dose1, 30)) / 30) %>%
-  ungroup
-
-set.seed(1234)
-nsamp <- 4
-usecos <- sccos %>%
-  slice_sample(n=nsamp) %>%
-  arrange(county)
-usecos
 
 tmp <- df3 %>%
   filter(state=="SC", county %in% usecos$county)
