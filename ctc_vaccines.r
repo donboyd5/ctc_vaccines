@@ -42,7 +42,15 @@ library(gtsummary)
 dld <- r"(C:\Users\donbo\Downloads\ctcvax)"  # download directory
 
 # constants -------------------------------------------------------------------------
+caption_left <- theme(plot.caption = element_text(hjust = 0))
 
+
+# functions ---------------------------------------------------------------
+stname <- function(stabbr) {
+  stabbrs <- c(state.abb, "DC", "US")
+  stnames <- c(state.name, "District of Columbia", "United States")
+  stnames[match(stabbr, stabbrs)]
+}
 
 # get data ----------------------------------------------------------------
 #.. county-level cumulative vaccinations ----
@@ -63,6 +71,7 @@ dld <- r"(C:\Users\donbo\Downloads\ctcvax)"  # download directory
  
 fname <- "COVID-19_Vaccinations_in_the_United_States_County_2022-01-31.csv"
 path <- file.path(dld, fname)
+
 df <- read_csv(path)
 dim(df)  # 1.3m, 51 cols
 glimpse(df)
@@ -72,24 +81,66 @@ glimpse(df)
 # clean and save a subset -------------------------------------------------
 df2 <- df %>%
   rename(date=Date,
+         mmrw=MMWR_week,
          fips=FIPS,
          state=Recip_State,
-         county=Recip_County) %>%
+         county=Recip_County,
+         metro=Metro_status,
+         svi=SVI_CTGY,
+         dose118p=Administered_Dose1_Recip_18Plus,
+         poppct18p=Administered_Dose1_Recip_18PlusPop_Pct,
+         pop18p=Census2019_18PlusPop,
+         pop=Census2019) %>%
   mutate(date=as.Date(date, format="%m/%d/%Y")) %>%
   arrange(date, state, county)
 summary(df2)
 ns(df2)
 
 df3 <- df2 %>%
-  select(date, mmrw=MMWR_week,
-         fips, state, county, 
-         metro=Metro_status,
-         dose118p=Administered_Dose1_Recip_18Plus,
-         poppct18p=Administered_Dose1_Recip_18PlusPop_Pct,
-         pop18p=Census2019_18PlusPop)
-memory()
-saveRDS(df3, here::here("data", "vax.rds"))
-rm(df, df2, df3)
+  select(date, mmrw,
+         fips, state, county,
+         metro, svi,
+         dose118p,
+         poppct18p,
+         pop18p,
+         pop)
+summary(df3)
+
+# create a factor for SVI
+# svi: CDC Social Vulnerability Index (SVI) rank categorization where:
+# A = 0– 0.25 SVI rank
+# B = 0.2501–0.50 SVI rank
+# C = 0.5001–0.75 SVI rank
+# D = 0.7501–1.0 SVI rank
+df3 %>%
+  filter(state=="NY", date==max(date)) %>%
+  arrange(desc(poppct18p)) %>%
+  select(county, date, poppct18p, svi)
+# Bronx has a D so that must be highest quartile of vulnerability
+# Saratoga has an A so that must be lowest quartile of vulnerability
+# a little surprising that Nassau County has an A
+# wonder how well this really discriminates
+# note that Unknown county is not coded
+
+vax <- df3 %>%
+  mutate(svif=factor(
+    svi, 
+    levels=c("A", "B", "C", "D"),
+    labels=c("Quartile 1: Least vulnerability",
+             "Quartile 2: 2nd-least vulnerability",
+             "Quartile 3: 2nd-most vulnerability",
+             "Quartile 4: Greatest vulnerability"))) %>%
+  relocate(svif, .after = svi)
+glimpse(vax)
+saveRDS(vax, here::here("data", "vax.rds"))
+# memory()
+# rm(df, df2, df3)
+
+# svi: CDC Social Vulnerability Index (SVI) rank categorization where:
+# A = 0– 0.25 SVI rank
+# B = 0.2501–0.50 SVI rank
+# C = 0.5001–0.75 SVI rank
+# D = 0.7501–1.0 SVI rank"
 
 
 # explore -----------------------------------------------------------------
@@ -97,6 +148,7 @@ vax <- readRDS(here::here("data", "vax.rds"))
 summary(vax)
 summary(vax %>% filter(date >= "2021-07-01", date <= "2021-12-31"))
 count(vax, metro)
+count(vax, svi, svif)
 
 vax %>%
   group_by(date) %>%
@@ -144,6 +196,242 @@ vax %>%
   geom_point() +
   ggtitle("vaccination rate 18+, metro/non-metro")
 # metro much higher than nonmetro
+
+# how does svi vary by state?
+svicheck <- vax %>% 
+  filter(date=="2021-09-30") %>%  # around the middle of our period
+  filter(dose118p > 0, !str_detect(county, "Unknown")) %>% # make sure it has usable data
+  group_by(state, svi) %>%
+  summarize(n=n(), pop=sum(pop, na.rm=TRUE),
+            .groups = "drop") %>%
+  group_by(state) %>%
+  mutate(pctn=n / sum(n),
+         pctpop=pop / sum(pop)) %>%
+  select(state, svi, pctpop) %>%
+  pivot_wider(names_from = svi, 
+              values_from = pctpop,
+              values_fill = 0) %>%
+  arrange(desc(D))
+svicheck
+# state       A       B      C       D  `NA`
+# <chr>   <dbl>   <dbl>  <dbl>   <dbl> <dbl>
+# 1 NM    0       0       0      1           0
+# 2 RI    0.397   0       0      0.603       0
+# 3 MS    0       0.155   0.244  0.600       0
+# 4 CA    0.0187  0.292   0.172  0.517       0
+# 5 LA    0       0.126   0.443  0.431       0
+# ...
+# 39 MN    0.425   0.446   0.114  0.0148      0
+# 40 IL    0.240   0.223   0.524  0.0136      0
+# 41 IA    0.444   0.472   0.0788 0.00533     0
+# 42 UT    0.163   0.813   0.0191 0.00477     0
+# 43 CT    0.138   0.372   0.490  0           0
+
+# we need to know number of A and D counties in each state
+# for our time period
+svicheck2 <- vax %>% 
+  filter(date=="2021-09-30") %>%  # around the middle of our period
+  filter(dose118p > 0, !str_detect(county, "Unknown")) %>% # make sure it has usable data
+  group_by(state, svi) %>%
+  summarize(n=n(),
+            .groups = "drop") %>%
+  pivot_wider(names_from = svi, 
+              values_from = n,
+              values_fill = 0) %>%
+  arrange(desc(D))
+svicheck2
+# state     A     B     C     D  `NA`
+# <chr> <int> <int> <int> <int> <int>
+# 1 GA       14    14    35    82     0
+# 2 MS        0     4    23    55     0
+# 3 LA        0     5    14    45     0
+# 4 NC        4    26    26    44     0
+# 5 KY        6    28    43    42     0
+# 6 AR        1     9    25    40     0
+# 7 OK        3    19    17    37     0
+# 8 AL        2     8    27    30     0
+# 9 FL        4    15    19    29     0
+# 10 VA       41    43    21    27     0
+
+
+# construct data by week in July-Dec 2021 ---------------------------------
+vweeks <- vax %>%
+  filter(date >= "2021-07-01", 
+         date <= "2021-12-31",
+         state %in% state.abb,
+         !str_detect(county, "Unknown")) %>%
+  mutate(day=day(date), 
+         nmonth=month(date)) %>%
+  filter(day %in% c(7, 14, 21)) %>%
+  # compute incremental vaccinations between weeks
+  arrange(state, county, date) %>%
+  group_by(state, county) %>%
+  mutate(vaxpct=dose118p / pop18p, # we need more precision than reported
+         newvax=vaxpct - lag(vaxpct)) %>%
+  filter(day != 7) %>%
+  ungroup %>%
+  mutate(week=factor(day,
+                     levels=c(14, 21),
+                     labels=c("ctcm1", "ctcp1")), # minus or plus 1 week
+         month=factor(nmonth,
+                      levels=7:12,
+                      labels=month.abb[7:12])
+         )
+stcos <- count(vweeks, state, county) 
+stcos %>% filter(state=="GA")
+
+# inspect the results to make sure they are right
+# GA, MS, LA, NC, KY all look worth looking at as high D states
+# st <- "TX"; cnty <- "Harris"  # no county data until Nov
+st <- "GA"; cnty <- "Decatur"
+vweeks %>%
+  filter(state==st, str_detect(county, cnty)) %>%
+  write_csv(here::here("temp.csv"))
+
+# how much did vax rates change in a single month in a single state
+vweeks %>%
+  filter(state=="NY", week %in% c("ctcm1", "ctcp1"), month=="Jul") %>%
+  select(month, county, svi, week, newvax) %>%
+  pivot_wider(names_from = week, values_from = newvax) %>%
+  ggplot(aes(ctcm1, ctcp1, colour=svi)) +
+  geom_point() +
+  geom_abline(slope=1)
+  
+sts <- c("RI", "MS", "CA", "NM")  # top 4 states %pop in D svi counties
+# states with enough counties
+sts <- c("CA", "MS", "TX", "GA")
+sts <- c("GA", "MS", "LA", "NC")
+sts <- c("GA", "NC", "KY", "VA")
+pdata <- vweeks %>%
+  filter(state %in% sts,
+         week %in% c("ctcm1", "ctcp1"),
+         svi %in% c("A", "D")) %>%
+  select(month, state, county, svi, week, newvax) %>%
+  pivot_wider(names_from = week, values_from = newvax) %>%
+  mutate(change=ctcp1 - ctcm1,
+         pch=change / ctcm1)
+
+p <- pdata %>%
+  filter(month=="Sep") %>%
+  ggplot(aes(ctcm1, ctcp1, colour=svi)) +
+  geom_point() +
+  geom_abline(slope=1) +
+  facet_wrap(~state, ncol=2, scales="free")
+p
+
+
+#.. find states with large numbers of A and D social vulnerability counties ----
+# and large % of pop in D counties
+
+# how does svi vary by state?
+svicheck <- vax %>% 
+  filter(date=="2021-09-30") %>%  # around the middle of our period
+  filter(dose118p > 0, !str_detect(county, "Unknown")) %>% # make sure it has usable data
+  group_by(state, svi) %>%
+  summarize(n=n(), pop=sum(pop, na.rm=TRUE),
+            .groups = "drop") %>%
+  group_by(state) %>%
+  mutate(pctn=n / sum(n),
+         pctpop=pop / sum(pop)) %>%
+  select(state, svi, pctpop) %>%
+  pivot_wider(names_from = svi, 
+              values_from = pctpop,
+              values_fill = 0) %>%
+  arrange(desc(D))
+svicheck
+# state       A       B      C       D  `NA`
+# <chr>   <dbl>   <dbl>  <dbl>   <dbl> <dbl>
+# 1 NM    0       0       0      1           0
+# 2 RI    0.397   0       0      0.603       0
+# 3 MS    0       0.155   0.244  0.600       0
+# 4 CA    0.0187  0.292   0.172  0.517       0
+# 5 LA    0       0.126   0.443  0.431       0
+# ...
+# 39 MN    0.425   0.446   0.114  0.0148      0
+# 40 IL    0.240   0.223   0.524  0.0136      0
+# 41 IA    0.444   0.472   0.0788 0.00533     0
+# 42 UT    0.163   0.813   0.0191 0.00477     0
+# 43 CT    0.138   0.372   0.490  0           0
+
+# we need to know number of A and D counties in each state
+# for our time period
+svigroups <- vax %>% 
+  filter(date=="2021-09-30") %>%  # around the middle of our period
+  filter(dose118p > 0, !str_detect(county, "Unknown")) %>% # make sure it has usable data
+  filter(state %in% state.abb) %>%
+  group_by(state, svi) %>%
+  summarize(n=n(),
+            pop18p=sum(pop18p, na.rm=TRUE),
+            .groups = "drop") %>%
+  group_by(state) %>%
+  mutate(poppct=pop18p / sum(pop18p)) %>%
+  select(-pop18p) %>%
+  pivot_wider(names_from = svi, values_from = c(n, poppct),
+              values_fill = 0)
+
+svigroups %>%
+  filter(n_A >= 5, n_D >= 5) %>%
+  arrange(desc(poppct_D))
+
+  
+
+sts <- c("GA", "NC", "KY", "VA")
+sts <- c("GA", "TN", "KY", "VA")
+pdata <- vweeks %>%
+  filter(state %in% sts,
+         week %in% c("ctcm1", "ctcp1"),
+         svi %in% c("A", "D")) %>%
+  mutate(stname=stname(state)) %>%
+  select(month, state, stname, county, svi, svif, week, dose118p) %>%
+  pivot_wider(names_from = week, values_from = dose118p) %>%
+  mutate(change=ctcp1 - ctcm1,
+         pch=change / ctcm1,
+         outlier=abs(pch) > .4) %>% # based on prior inspection of data
+  na.omit()
+summary(pdata)
+
+capt1 <- "States selected have the largest percentages of their population in greatest-vulnerability counties,"
+capt2 <- "\namong states with at least 5 counties in least- and greatest- social vulnerability categories."
+
+capt3 <- "\nNote: Each dot is a county. Outliers (n=8) with absolute % change greater than 40% are excluded."
+capt <- paste0(capt1, capt2 ,"\n", capt3)
+
+gtitle <- "% change in 1st-dose vaccinations from week before advance CTC deposit date to week after"
+gsubtitle <- "Selected states, population age 18+"
+
+p <- pdata %>%
+  filter(!outlier) %>%
+  ggplot(aes(month, pch, colour=svif)) +
+  geom_point(position=position_dodge(width = 0.40), size=1) +
+  geom_hline(yintercept = 0) +
+  scale_y_continuous(name="% change from week before to week after",
+                     breaks=seq(-1, 1, .02),
+                     labels = label_percent(accuracy=1)) +
+  scale_colour_manual(values=c("darkgreen", "blue")) +
+  facet_wrap(~stname, ncol=2, scales="free") +
+  ggtitle(gtitle,
+          subtitle=gsubtitle) +
+  labs(x=NULL,
+       colour="Social vulnerability",
+       caption=capt) +
+  theme_bw() +
+  caption_left
+p
+ggsave(filename = here::here("results", "dose1pch_bysvi.png"),
+       plot=p, height=6, width=10, scale=1)
+
+
+p <- vweeks %>%
+  filter(state %In% c("NY", week %in% c("ctcm1", "ctcp1")) %>%
+  select(month, county, svi, week, newvax) %>%
+  pivot_wider(names_from = week, values_from = newvax) %>%
+  ggplot(aes(ctcm1, ctcp1, colour=svi)) +
+  geom_point() +
+  geom_abline(slope=1) +
+  facet_wrap(~month, ncol=2, scales="free")
+p
+
+ggsave(filename = here::here("results", "plot.png"), plot=p, width=8, height=8)
 
 
 # weekly vaccinations, metro/nonmetro -------------------------------------
