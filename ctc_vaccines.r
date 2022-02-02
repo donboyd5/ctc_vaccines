@@ -373,6 +373,125 @@ ggsave(filename = here::here("results", "dose1popch_svi_boxplot.png"),
        plot=p, height=6, width=10, scale=1.25)
 
 
+#.. Figure svi_all ----
+# get bounds for box plots
+pdata_quants <- pbase %>%
+  mutate(svi2=case_when(svi %in% c("A", "B") ~ "AB",
+                        svi %in% c("C", "D") ~ "CD",
+                        TRUE ~ NA_character_),
+         svif2=factor(svi2, 
+                      levels=c("AB", "CD"),
+                      labels=c("Below median", "Above median"))) %>%
+  group_by(state, nmonth, month, svi2, svif2) %>%
+  summarise(n=n(), 
+            p25=p25(change),
+            p50=p50(change),
+            p75=p75(change), 
+            .groups="drop")
+
+
+capt <- "Source: Centers for Disease Control"
+
+gtitle <- "Change in 1st-dose age 18+ vaccinations from week before 15th of month to week after, as % of age 18+ population"
+gsubtitle <- "Counties in Georgia"
+
+ylab <- "Change as % of population age 18+"
+
+p <- pdata_quants %>%
+  filter(nmonth >= 2) %>%
+  filter(state=="GA", svi2 %in% c("AB", "CD")) %>%
+  group_by(state, svi2) %>%
+  arrange(nmonth) %>%
+  mutate(row=row_number()) %>%
+  ungroup %>%
+  ggplot(aes(month)) +
+  geom_boxplot(aes(ymin = p25, 
+                   lower = p25, 
+                   middle = p50,
+                   upper = p75, 
+                   ymax = p75,
+                   fill=svif2),
+               alpha=.5,
+               stat="identity") +
+  scale_fill_manual(values = c("blue", "red")) +
+  # scale_x_date(name=NULL, date_breaks = "months", date_labels = "%b %Y") +
+  scale_x_discrete(labels=paste0(unique(pdata_quants$month), " 2021")) +
+  scale_y_continuous(name="change as % of 18+ population",
+                     breaks=seq(-1, 1, .001),
+                     labels=label_percent(accuracy=.1)) +
+  geom_hline(yintercept = 0) +
+  geom_vline(aes(xintercept = first(row[month=="Jun"]) + .5), linetype="dotted") +
+  ggtitle(gtitle,
+          subtitle=gsubtitle) +
+  labs(x=NULL,
+       fill="Social vulnerability",
+       caption=capt) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  caption_left
+p  
+
+ggsave(filename = here::here("results", "dose1popch_svi2_boxplot.png"),
+       plot=p, height=6, width=10, scale=1.25)
+
+
+#.. Figure metro ----
+# get bounds for box plots
+pdata_quants <- pbase %>%
+  group_by(state, nmonth, month, metro) %>%
+  summarise(n=n(), 
+            p25=p25(change),
+            p50=p50(change),
+            p75=p75(change), 
+            .groups="drop")
+
+
+capt <- "Source: Centers for Disease Control"
+
+gtitle <- "Change in 1st-dose age 18+ vaccinations from week before 15th of month to week after, as % of age 18+ population"
+gsubtitle <- "Counties in Georgia"
+
+ylab <- "Change as % of population age 18+"
+
+p <- pdata_quants %>%
+  filter(nmonth >= 2) %>%
+  filter(state=="GA") %>%
+  group_by(state, metro) %>%
+  arrange(nmonth) %>%
+  mutate(row=row_number()) %>%
+  ungroup %>%
+  ggplot(aes(month)) +
+  geom_boxplot(aes(ymin = p25, 
+                   lower = p25, 
+                   middle = p50,
+                   upper = p75, 
+                   ymax = p75,
+                   fill=metro),
+               alpha=.5,
+               stat="identity") +
+  scale_fill_manual(values = c("blue", "red")) +
+  scale_x_discrete(labels=paste0(unique(pdata_quants$month), " 2021")) +
+  scale_y_continuous(name="change as % of 18+ population",
+                     breaks=seq(-1, 1, .001),
+                     labels=label_percent(accuracy=.1)) +
+  geom_hline(yintercept = 0) +
+  geom_vline(aes(xintercept = first(row[month=="Jun"]) + .5), linetype="dotted") +
+  ggtitle(gtitle,
+          subtitle=gsubtitle) +
+  labs(x=NULL,
+       fill="Metropolitan status",
+       caption=capt) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  caption_left
+p  
+
+ggsave(filename = here::here("results", "dose1popch_metro_boxplot.png"),
+       plot=p, height=6, width=10, scale=1.25)
+
+
+
+# OLD BELOW HERE ----
 #.. boxplot how did things change, over time ----
 
 pdata1 <- vweeks %>%
