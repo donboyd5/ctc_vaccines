@@ -16,6 +16,10 @@ library(RcppRoll)
 library(fredr)
 library(btools)
 
+# time series
+library(forecast)
+library(zoo)
+
 # graphics
 library(scales)
 library(ggbeeswarm)
@@ -43,6 +47,8 @@ dld <- r"(C:\Users\donbo\Downloads\ctcvax)"  # download directory
 
 # constants -------------------------------------------------------------------------
 caption_left <- theme(plot.caption = element_text(hjust = 0))
+legend_none <- theme(legend.position = "None")
+legend_notitle <- theme(legend.title = element_blank())
 
 
 # functions ---------------------------------------------------------------
@@ -52,7 +58,7 @@ stname <- function(stabbr) {
   stnames[match(stabbr, stabbrs)]
 }
 
-# get data ----------------------------------------------------------------
+# ONETIME get data ----------------------------------------------------------------
 #.. county-level cumulative vaccinations ----
 # https://www.cdc.gov/coronavirus/2019-ncov/vaccines/distributing/about-vaccine-data.html
 
@@ -143,10 +149,16 @@ saveRDS(vax, here::here("data", "vax.rds"))
 # D = 0.7501–1.0 SVI rank"
 
 
-# figure for proposal -----------------------------------------------------
+# RETRIEVE vax data, calc  -----------------------------------------------------
 vax <- readRDS(here::here("data", "vax.rds"))
 
+stcos <- vax %>%
+  group_by(state, county) %>%
+  summarise(n=n(), pop18p=first(pop18p), svi=first(svi), .groups="drop")
 
+stcos %>%
+  filter(state=="GA") %>%
+  arrange(desc(pop18p))
 
 #.. find states with large numbers of A and D social vulnerability counties ----
 # and large % of pop in D counties
@@ -171,10 +183,106 @@ svigroups %>%
   filter(n_A >= 5, n_D >= 5) %>%
   arrange(desc(poppct_D))
 
-#.. construct data by week in July-Dec 2021 ---------------------------------
+
+# Figure: Vaccine data, daily and weekly frequencies ----
+
+dw1 <- vax %>%
+  mutate(rate=dose118p / pop18p) %>%
+  select(state, county, date, dose118p, pop18p, rate, poppct18p)
+
+# calculated rate has more precision; given rate capped at .999 or .95
+# check <- dw1 %>% 
+#   mutate(poppct18p=poppct18p / 100, 
+#          diff=rate - poppct18p) %>% 
+#   filter(abs(diff) > .01)
+
+dw2 <- dw1 %>%
+  arrange(state, county, date) %>%
+  mutate(wday01=(rate - lag(rate, 1)) * 7,
+         wday07=(rate - lag(rate, 7)) ,
+         wday30=(rate - lag(rate, 30)) / 30 * 7,
+         wday07b=ifelse(wday(date)==5, wday07, NA_real_))
+summary(dw2)  
+
+dw3 <- dw2 %>%
+  select(state, county, date, rate, starts_with("wday")) %>%
+  pivot_longer(-c(state, county, date))
+
+
+# cumulative plot, and daily-weekly plot
+# st <- "NY"; copiece <- "Orange"
+# st <- "GA"; copiece <- "Telfair"
+# st <- "GA"; copiece <- "Decatur"
+# st <- "GA"; copiece <- "Jenkins"
+st <- "GA"; copiece <- "Fulton"
+
+start <- "2021-01-01"
+
+pbase <- dw3 %>%
+  filter(state == st,
+         str_detect(county, copiece),
+         value > 0, 
+         date >= start,
+         date <= "2021-12-31") 
+
+(stconame <- paste0(pbase$county[1], ", ", stname(st)))
+
+p1 <- pbase %>%
+  filter(name=="rate") %>%
+  ggplot(aes(date, value)) +
+  geom_line() +
+  geom_point(size=.75, colour="blue") +
+  scale_x_date(name=NULL, date_breaks = "months", date_labels = "%b %Y") +
+  scale_y_continuous(name="percent of 18+ population",
+                     limits=c(0, 1),
+                     breaks=seq(-1, 1, .1),
+                     labels=label_percent(accuracy = 1)) +
+  ggtitle("Cumulative number of 1st-dose age 18+ vaccinations as % of population 18+",
+          subtitle = stconame) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+p1
+
+p2 <- pbase %>%
+  filter(name %in% c("wday01", "wday07b")) %>%
+  # filter(value < .2) %>%
+  # na.omit() %>%
+  mutate(name=factor(name,
+                     levels=c("wday01", "wday07b"),
+                     labels=c("daily", "weekly"))) %>%
+  arrange(state, county, name) %>%
+  ggplot(aes(date, value, colour=name)) +
+  geom_line() +
+  geom_point(aes(size=name)) +
+  scale_size_manual(values=c(.25, .75, .75)) +
+  scale_colour_manual(values=c("lightgrey", "darkgreen", "blue")) +
+  scale_x_date(name=NULL, date_breaks = "months", date_labels = "%b %Y") +
+  scale_y_continuous(name="percent of 18+ population",
+                     breaks=seq(-1, 1, .01),
+                     labels=label_percent(accuracy = .1)) +
+  ggtitle("New 1st-dose age 18+ vaccinations as % of population 18+",
+          subtitle = paste0(stconame, ".  Daily and weekly immunizations, shown at weekly rates.")) +
+  labs(caption="\nSource: Centers for Disease Control") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  legend_notitle +
+  caption_left
+p2
+
+p <- p1 / p2
+p
+ggsave(here::here("results", "dayweek.png"), plot=p, width=8, height = 8)
+
+# Figures: box plot of change in weekly data ----
+#.. construct data by week relative to 15th, 2021 ---------------------------------
+
+start <- "2021-01-01"
+end <- "2021-12-31"
+(months <- month(start):month(end))
+
 vweeks <- vax %>%
-  filter(date >= "2021-07-01", 
-         date <= "2021-12-31",
+  filter(date >= start, 
+         date <= end,
          state %in% state.abb,
          dose118p > 0,
          !str_detect(county, "Unknown")) %>%
@@ -184,19 +292,160 @@ vweeks <- vax %>%
   # compute incremental vaccinations between weeks
   arrange(state, county, date) %>%
   group_by(state, county) %>%
-  mutate(pch_cumul=dose118p / lag(dose118p) - 1,
-         newvax=dose118p - lag(dose118p)) %>%
+  mutate(newvax=dose118p - lag(dose118p), 
+         newvaxpct=newvax / pop18p) %>%
   filter(day != 7) %>%
   ungroup %>%
   mutate(week=factor(day,
                      levels=c(14, 21),
                      labels=c("ctcm1", "ctcp1")), # minus or plus 1 week
-         month=factor(nmonth,
-                      levels=7:12,
-                      labels=month.abb[7:12])
+         month=nmonth,
+         month=factor(month,
+                      levels=months,
+                      labels=month.abb[months])
   )
 
-#.. prepare graph -----------------------------------------------------------
+
+#.. prepare base data file ----
+pbase <- vweeks %>%
+  filter(nmonth > 1,
+         week %in% c("ctcm1", "ctcp1")) %>%
+  mutate(stname=stname(state)) %>%
+  select(nmonth, month, state, stname, county, metro, svi, svif, pop18p, week, value=newvaxpct) %>%
+  pivot_wider(names_from = week) %>%
+  na.omit() %>%
+  mutate(change=ctcp1 - ctcm1)
+
+
+#.. Figure svi ----
+# get bounds for box plots
+pdata_quants <- pbase %>%
+  group_by(state, nmonth, month, svi, svif) %>%
+  summarise(n=n(), 
+            p25=p25(change),
+            p50=p50(change),
+            p75=p75(change), 
+            .groups="drop")
+
+
+capt <- "Source: Centers for Disease Control"
+
+gtitle <- "Change in 1st-dose age 18+ vaccinations from week before 15th of month to week after, as % of age 18+ population"
+gsubtitle <- "Counties in Georgia"
+
+ylab <- "Change as % of population age 18+"
+
+p <- pdata_quants %>%
+  filter(nmonth >= 2) %>%
+  filter(state=="GA", svi %in% c("A", "D")) %>%
+  group_by(state, svi) %>%
+  arrange(nmonth) %>%
+  mutate(row=row_number()) %>%
+  ungroup %>%
+  ggplot(aes(month)) +
+  geom_boxplot(aes(ymin = p25, 
+                   lower = p25, 
+                   middle = p50,
+                   upper = p75, 
+                   ymax = p75,
+                   fill=svif),
+               alpha=.5,
+               stat="identity") +
+  scale_fill_manual(values = c("blue", "red")) +
+  # scale_x_date(name=NULL, date_breaks = "months", date_labels = "%b %Y") +
+  scale_x_discrete(labels=paste0(unique(pdata_quants$month), " 2021")) +
+  scale_y_continuous(name="change as % of 18+ population",
+                     breaks=seq(-1, 1, .001),
+                     labels=label_percent(accuracy=.1)) +
+  geom_hline(yintercept = 0) +
+  geom_vline(aes(xintercept = first(row[month=="Jun"]) + .5), linetype="dotted") +
+  ggtitle(gtitle,
+          subtitle=gsubtitle) +
+  labs(x=NULL,
+       fill="Social vulnerability",
+       caption=capt) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  caption_left
+p  
+
+ggsave(filename = here::here("results", "dose1popch_svi_boxplot.png"),
+       plot=p, height=6, width=10, scale=1.25)
+
+
+#.. boxplot how did things change, over time ----
+
+pdata1 <- vweeks %>%
+  filter(nmonth > 1,
+         week %in% c("ctcm1", "ctcp1")) %>%
+  mutate(stname=stname(state), 
+         newvaxpct=newvax / pop18p) %>%
+  select(nmonth, month, state, stname, county, svi, pop18p, week, value=newvaxpct) %>%
+  pivot_wider(names_from = week) %>%
+  na.omit() %>%
+  mutate(change=ctcp1 - ctcm1)
+
+pdata <- pdata1 %>%
+  group_by(nmonth, month) %>%
+  summarise(n=n(), 
+            p25=p25(change),
+            p50=p50(change),
+            p75=p75(change), 
+            .groups="drop")
+
+pdata <- pdata1 %>%
+  # filter(state=="GA", svi=="D") %>%
+  filter(state=="GA") %>%
+  group_by(nmonth, month) %>%
+  summarise(n=n(), 
+            p25=p25(change),
+            p50=p50(change),
+            p75=p75(change), 
+            .groups="drop")
+
+p <- pdata %>%
+  filter(nmonth >= 5) %>%
+  mutate(row=row_number()) %>%
+  ggplot(aes(month)) +
+  geom_boxplot(aes(ymin = p25, lower = p25, 
+                   middle = p50,
+                   upper = p75, ymax = p75),
+               # notch=TRUE,
+               stat="identity") +
+  # scale_y_continuous(limits=c(-.02, .02)) +
+  geom_hline(yintercept = 0) +
+  geom_vline(aes(xintercept = row[month=="Jun"] + .5), linetype="dotted")
+p  
+
+ggsave(filename = here::here("results", "dose1popch_boxplot.png"),
+       plot=p, height=6, width=10, scale=1)
+
+
+
+
+
+y <- rnorm(100)
+df <- data.frame(
+  x = 1,
+  y0 = min(y),
+  y25 = quantile(y, 0.25),
+  y50 = median(y),
+  y75 = quantile(y, 0.75),
+  y100 = max(y)
+)
+ggplot(df, aes(x)) +
+  geom_boxplot(
+    aes(ymin = y0, lower = y25, middle = y50, upper = y75, ymax = y100),
+    stat = "identity"
+  )
+ggplot(df, aes(x)) +
+  geom_boxplot(
+    aes(lower = y25, middle = y50, upper = y75),
+    stat = "identity"
+  )
+
+
+#.. prepare 4-state graph -----------------------------------------------------------
 sts <- c("GA", "TN", "KY", "VA")  # top 4 states with enough svi A, D counties
 
 pdata <- vweeks %>%
@@ -204,9 +453,9 @@ pdata <- vweeks %>%
          week %in% c("ctcm1", "ctcp1"),
          svi %in% c("A", "D")) %>%
   mutate(stname=stname(state)) %>%
-  select(month, state, stname, county, pop18p, svi, svif, week, dose118p, newvax) %>%
+  select(nmonth, month, state, stname, county, pop18p, svi, svif, week, dose118p, newvax) %>%
   mutate(newvaxpct=newvax / pop18p) %>%
-  select(month, state, stname, county, pop18p, svi, svif, week, value=newvaxpct) %>%
+  select(nmonth, month, state, stname, county, pop18p, svi, svif, week, value=newvaxpct) %>%
   pivot_wider(names_from = week) %>%
   na.omit() %>%
   mutate(change=ctcp1 - ctcm1)
@@ -234,20 +483,23 @@ capt3 <- "\nNote: Each dot is a county."
 capt <- paste0(capt1, capt2 ,"\n", capt3)
 # . Outliers (n=8) with absolute % change greater than 40% are excluded.
 
-gtitle <- "Change in 1st-dose age 18+ vaccinations from week before advance CTC deposit to week after"
+gtitle <- "Change in 1st-dose age 18+ vaccinations from week before 15th of month to week after"
 gsubtitle <- "As % of age 18+ population, selected states"
 
 ylab <- "Change in weekly vaccinations as % of population age 18+"
 
+first_month <- 2
 p <- pdata %>%
+  filter(nmonth >= first_month) %>%
   # filter(!outlier) %>%
   ggplot(aes(month, change, colour=svif)) +
   geom_point(position=position_dodge(width = 0.40), size=1) +
   geom_hline(yintercept = 0) +
+  geom_vline(xintercept=first_month + 3.5, linetype="dotted") +
   scale_y_continuous(name=ylab,
                      breaks=seq(-1, 1, .01),
                      labels = label_percent(accuracy=1)) +
-  scale_colour_manual(values=c("darkgreen", "blue")) +
+  scale_colour_manual(values=c("blue", "red")) +
   facet_wrap(~stname, ncol=2, scales="free") +
   ggtitle(gtitle,
           subtitle=gsubtitle) +
@@ -261,8 +513,268 @@ ggsave(filename = here::here("results", "dose1popch_bysvi.png"),
        plot=p, height=6, width=10, scale=1)
 
 
+#.. metro/nonmetro ----
+
+pdata <- vweeks %>%
+  filter(state %in% sts,
+         week %in% c("ctcm1", "ctcp1")) %>%
+  mutate(stname=stname(state),
+         metro=ifelse(metro=="Non-metro", "NonMetro", metro)) %>%
+  select(nmonth, month, state, stname, county, pop18p, metro, week, dose118p, newvax) %>%
+  mutate(newvaxpct=newvax / pop18p) %>%
+  select(nmonth, month, state, stname, county, pop18p, metro, week, value=newvaxpct) %>%
+  pivot_wider(names_from = week) %>%
+  na.omit() %>%
+  mutate(change=ctcp1 - ctcm1)
+# outlier=abs(pch) > .4) # based on prior inspection of data
+summary(pdata)
+
+# note that we do not have the same number of counties available in each group
+# big diff for GA in Jul, Dec, others not so bad
+pdata %>%
+  group_by(state, month, metro) %>%
+  summarise(n=n()) %>%
+  pivot_wider(names_from = metro, values_from = n) %>%
+  mutate(ntot=Metro + NonMetro)
+
+pdata %>%
+  group_by(state, month, metro) %>%
+  summarise(change=median(change)) %>%
+  pivot_wider(names_from = metro, values_from = change) %>%
+  mutate(diff=Metro - NonMetro)
+
+capt1 <- "States selected have the largest percentages of their population in greatest-vulnerability counties,"
+capt2 <- " among states\nwith at least 5 counties in least- and greatest- social vulnerability categories."
+
+capt3 <- "\nNote: Each dot is a county."
+capt <- paste0(capt1, capt2 ,"\n", capt3)
+# . Outliers (n=8) with absolute % change greater than 40% are excluded.
+
+gtitle <- "Change in 1st-dose age 18+ vaccinations from week before 15th of month to week after"
+gsubtitle <- "As % of age 18+ population, selected states"
+
+ylab <- "Change in weekly vaccinations as % of population age 18+"
+
+first_month <- 2
+p <- pdata %>%
+  filter(nmonth >= first_month) %>%
+  filter(abs(change) <= .2) %>%
+  ggplot(aes(month, change, colour=metro)) +
+  geom_point(position=position_dodge(width = 0.40), size=1) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept=first_month + 3.5, linetype="dotted") +
+  scale_y_continuous(name=ylab,
+                     breaks=seq(-1, 1, .01),
+                     labels = label_percent(accuracy=1)) +
+  scale_colour_manual(values=c("darkgreen", "blue")) +
+  facet_wrap(~stname, ncol=2, scales="free") +
+  ggtitle(gtitle,
+          subtitle=gsubtitle) +
+  labs(x=NULL,
+       colour="Metropolitan status",
+       caption=capt) +
+  theme_bw() +
+  caption_left
+p
+ggsave(filename = here::here("results", "dose1popch_bymetro.png"),
+       plot=p, height=6, width=10, scale=1)
 
 
+
+tmp <- vax %>%
+  filter(year(date)==2021, month(date)>=2, state %in% sts, dose118p > 0) %>%
+  na.omit() %>%
+  mutate(month=month(date)) %>%
+  group_by(state, county, month) %>%
+  summarise(n=n(), dose118p=sum(dose118p), poppct18p=median(poppct18p))
+  
+#.. prepare 4-state boxplot -----------------------------------------------------------
+sts <- c("GA", "TN", "KY", "VA")  # top 4 states with enough svi A, D counties
+
+pdata <- vweeks %>%
+  filter(state %in% sts,
+         week %in% c("ctcm1", "ctcp1"),
+         svi %in% c("A", "D")) %>%
+  mutate(stname=stname(state)) %>%
+  select(nmonth, month, state, stname, county, pop18p, svi, svif, week, dose118p, newvax) %>%
+  mutate(newvaxpct=newvax / pop18p) %>%
+  select(nmonth, month, state, stname, county, pop18p, svi, svif, week, value=newvaxpct) %>%
+  pivot_wider(names_from = week) %>%
+  na.omit() %>%
+  mutate(change=ctcp1 - ctcm1)
+# outlier=abs(pch) > .4) # based on prior inspection of data
+summary(pdata)
+
+# note that we do not have the same number of counties available in each group
+# big diff for GA in Jul, Dec, others not so bad
+pdata %>%
+  group_by(state, month, svi) %>%
+  summarise(n=n()) %>%
+  pivot_wider(names_from = svi, values_from = n) %>%
+  mutate(ntot=A + D)
+
+pdata %>%
+  group_by(state, month, svi) %>%
+  summarise(change=median(change)) %>%
+  pivot_wider(names_from = svi, values_from = change) %>%
+  mutate(DmA=D - A)
+
+#..make the plot ----
+capt1 <- "States selected have the largest percentages of their population in greatest-vulnerability counties,"
+capt2 <- " among states\nwith at least 5 counties in least- and greatest- social vulnerability categories."
+
+capt3 <- "\nNote: Each dot is a county."
+capt <- paste0(capt1, capt2 ,"\n", capt3)
+# . Outliers (n=8) with absolute % change greater than 40% are excluded.
+
+gtitle <- "Change in 1st-dose age 18+ vaccinations from week before 15th of month to week after"
+gsubtitle <- "As % of age 18+ population, selected states"
+
+ylab <- "Change in weekly vaccinations as % of population age 18+"
+
+first_month <- 2
+p <- pdata %>%
+  filter(nmonth >= first_month) %>%
+  # filter(!outlier) %>%
+  ggplot(aes(month, change, colour=svif)) +
+  geom_boxplot(outlier.shape = NA,
+               position=position_dodge(width = .1),
+               width=1,
+               size=1) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept=first_month + 3.5, linetype="dotted") +
+  scale_y_continuous(name=ylab,
+                     breaks=seq(-1, 1, .01),
+                     limits=c(-.03, .03),
+                     labels = label_percent(accuracy=1)) +
+  scale_colour_manual(values=c("blue", "red")) +
+  facet_wrap(~stname, ncol=2, scales="free") +
+  ggtitle(gtitle,
+          subtitle=gsubtitle) +
+  labs(x=NULL,
+       colour="Social vulnerability",
+       caption=capt) +
+  theme_bw() +
+  caption_left
+p
+
+
+first_month <- 2
+p <- pdata %>%
+  filter(nmonth >= first_month) %>%
+  # filter(!outlier) %>%
+  ggplot(aes(month, change, fill=svif)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept=first_month + 3.5, linetype="dotted") +
+  scale_y_continuous(name=ylab,
+                     breaks=seq(-1, 1, .01),
+                     # limits=c(-.03, .03),
+                     labels = label_percent(accuracy=1)) +
+  scale_fill_manual(values=c("blue", "red")) +
+  facet_wrap(~stname, ncol=2, scales="free") +
+  ggtitle(gtitle,
+          subtitle=gsubtitle) +
+  labs(x=NULL,
+       colour="Social vulnerability",
+       caption=capt) +
+  theme_bw() +
+  caption_left
+p
+
+ggsave(filename = here::here("results", "dose1popch_bysvi_box.png"),
+       plot=p, height=6, width=10, scale=1)
+
+
+first_month <- 2
+pdata2 <- pdata %>%
+  group_by(nmonth, month, state, svi, svif) %>%
+  summarise(n=n(), 
+            p25=p25(change),
+            p50=p50(change),
+            p75=p75(change), 
+            .groups="drop")
+
+
+p <- pdata2 %>%
+  filter(nmonth >= first_month) %>%
+  mutate(row=row_number()) %>%
+  ggplot(aes(nmonth)) +
+  geom_boxplot(aes(ymin = p25, lower = p25, 
+                   middle = p50,
+                   upper = p75, ymax = p75,
+                   fill=svif),
+               stat="identity") +
+  # scale_y_continuous(limits=c(-.02, .02)) +
+  geom_hline(yintercept = 0) +
+  geom_vline(aes(xintercept = row[month=="Jun"] + .5), linetype="dotted")
+
+p <- pdata %>%
+  filter(nmonth >= first_month) %>%
+  # filter(!outlier) %>%
+  ggplot(aes(month, change, fill=svif)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept=first_month + 3.5, linetype="dotted") +
+  scale_y_continuous(name=ylab,
+                     breaks=seq(-1, 1, .01),
+                     limits=c(-.03, .03),
+                     labels = label_percent(accuracy=1)) +
+  scale_fill_manual(values=c("blue", "red")) +
+  facet_wrap(~stname, ncol=2, scales="free") +
+  ggtitle(gtitle,
+          subtitle=gsubtitle) +
+  labs(x=NULL,
+       colour="Social vulnerability",
+       caption=capt) +
+  theme_bw() +
+  caption_left
+p
+
+ggsave(filename = here::here("results", "dose1popch_bysvi_box.png"),
+       plot=p, height=6, width=10, scale=1)
+
+#.. single state ----
+pdata1 <- vweeks %>%
+  filter(week %in% c("ctcm1", "ctcp1"),
+         svi %in% c("A", "D")) %>%
+  mutate(stname=stname(state)) %>%
+  select(nmonth, month, state, stname, county, pop18p, svi, svif, week, dose118p, newvax) %>%
+  mutate(newvaxpct=newvax / pop18p) %>%
+  select(nmonth, month, state, stname, county, pop18p, svi, svif, week, value=newvaxpct) %>%
+  pivot_wider(names_from = week) %>%
+  na.omit() %>%
+  mutate(change=ctcp1 - ctcm1)
+
+
+pdata2 <- pdata1 %>%
+  group_by(nmonth, month, state, svi, svif) %>%
+  summarise(n=n(), 
+            p25=p25(change),
+            p50=p50(change),
+            p75=p75(change), 
+            .groups="drop")
+
+sts <- c("GA", "TN", "KY", "VA")  # top 4 states with enough svi A, D counties
+first_month <- 2
+p <- pdata2 %>%
+  filter(state==sts[4]) %>%
+  filter(nmonth >= first_month) %>%
+  group_by(state, svi) %>%
+  arrange(nmonth) %>%
+  mutate(row=row_number()) %>%
+  ggplot(aes(month,
+             fill=svif)) +
+  geom_boxplot(aes(ymin = p25, lower = p25, 
+                   middle = p50,
+                   upper = p75, ymax = p75),
+               stat="identity") +
+  # scale_y_continuous(limits=c(-.02, .02)) +
+  geom_hline(yintercept = 0) +
+  geom_vline(aes(xintercept = first(row[month=="Jun"]) + .5), linetype="dotted")
+p
+ggsave(filename = here::here("results", "box1.png"),
+       plot=p, height=6, width=10, scale=1)
 
 # OLDER data exploration below here ----
 # explore -----------------------------------------------------------------
@@ -837,3 +1349,44 @@ tmp4 %>%
   geom_point(colour="red", data=. %>% group_by(month) %>% mutate(change=mean(change)))
   geom_hline(yintercept = 0)
 
+# outlier checks ----
+  
+  check <- dw2 %>%
+    select(state, county, date, starts_with("wday")) %>%
+    filter(state=="NY", str_detect(county, "Albany"))
+  
+  tmp <- tsoutliers(check$wday07)
+  check <- check %>%
+    mutate(replace=NA_real_, rep2=wday07)
+  check$replace[tmp$index] <- tmp$replacements
+  check$rep2[tmp$index] <- NA_real_
+  
+  check %>%
+    ggplot(aes(date, wday01)) +
+    geom_line(colour="blue") +
+    geom_point(aes(y=replace), colour="red") +
+    scale_y_continuous(limits=c(0, NA))
+  
+  check %>%
+    ggplot(aes(date, rep2)) +
+    geom_line(colour="blue")
+  
+  
+  ts01 <- ts(dw2$wday01)
+  
+  ts01 <- zoo(dw2$wday01, dw2$date)
+  tmp$index
+  
+  dw3 %>%
+    filter(state %in% "NY", str_detect(county, "Albany")) %>%
+    filter(value > 0) %>%
+    filter(name != "wday30") %>%
+    ggplot(aes(date, value, colour=name)) +
+    geom_line() +
+    scale_y_continuous(limits=c(0, .1))
+  
+  
+  tmp <- df3 %>%
+    filter(state=="SC", county %in% usecos$county)
+  
+  
